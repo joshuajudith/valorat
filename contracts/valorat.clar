@@ -9,10 +9,20 @@
 (define-constant ERR-ALREADY-INITIALIZED u105)
 (define-constant ERR-INVALID-FEE u106)
 (define-constant ERR-TRANSFER-FAILED u107)
+;; New error constants for enhancements
+(define-constant ERR-WITHDRAWAL-TOO-LARGE u200)
+(define-constant ERR-DAILY-LIMIT-EXCEEDED u201)
+(define-constant ERR-CIRCUIT-BREAKER-TRIGGERED u202)
+(define-constant ERR-COOLDOWN-NOT-EXPIRED u203)
+(define-constant ERR-INVALID-YIELD-RATE u204)
 
 ;; Contract constants
 (define-constant MAX-FEE-BPS u1000) ;; Maximum 10% fee
 (define-constant PRECISION u1000000) ;; For calculations
+;; New constants for enhancements
+(define-constant BLOCKS-PER-YEAR u52560) ;; Approximate blocks per year
+(define-constant BASIS-POINTS u10000)
+(define-constant MAX-YIELD-RATE u2000) ;; Maximum 20% annual yield
 
 ;; Data variables
 (define-data-var contract-owner principal tx-sender)
@@ -23,9 +33,25 @@
 (define-data-var management-fee-bps uint u100) ;; 1% default fee
 (define-data-var is-initialized bool false)
 
+;; New data variables for yield generation
+(define-data-var annual-yield-rate uint u500) ;; 5% annual yield (in basis points)
+(define-data-var last-yield-update uint u0)
+(define-data-var accumulated-yield uint u0)
+
+;; New data variables for risk management
+(define-data-var daily-withdrawal-limit uint u1000000) ;; 1M STX daily limit
+(define-data-var max-single-withdrawal-pct uint u1000) ;; 10% of total assets max
+(define-data-var circuit-breaker-threshold uint u2000) ;; 20% price drop triggers circuit breaker
+(define-data-var circuit-breaker-active bool false)
+(define-data-var circuit-breaker-cooldown uint u144) ;; 24 hours in blocks
+(define-data-var last-price-update uint u0)
+(define-data-var historical-share-price uint u1000000)
+
 ;; Maps
 (define-map user-shares principal uint)
 (define-map user-deposits principal uint)
+;; New maps for risk management
+(define-map daily-withdrawals uint uint) ;; block-day -> total withdrawn
 
 ;; Private helper functions
 (define-private (is-contract-owner)
@@ -39,7 +65,7 @@
 
 (define-private (check-not-paused)
   (if (var-get is-paused)
-    (err ERR-VAULT-PAUSED)  ;; Fixed: ERR-VAULT-PAUSED is already u101, not (err u101)
+    (err ERR-VAULT-PAUSED)
     (ok true)))
 
 (define-private (calculate-shares-for-deposit (deposit-amount uint))
@@ -68,6 +94,65 @@
       error (err ERR-TRANSFER-FAILED))
     (ok true)))
 
+;; New private functions for yield generation
+(define-private (calculate-pending-yield)
+  (let ((current-block stacks-block-height)
+        (last-update (var-get last-yield-update))
+        (blocks-elapsed (- current-block last-update))
+        (current-total-assets (var-get total-assets))
+        (annual-rate (var-get annual-yield-rate)))
+    (if (and (> blocks-elapsed u0) (> current-total-assets u0) (> last-update u0))
+      (/ (* (* current-total-assets annual-rate) blocks-elapsed) 
+         (* BASIS-POINTS BLOCKS-PER-YEAR))
+      u0)))
+
+(define-private (update-yield-internal)
+  (let ((pending-yield (calculate-pending-yield)))
+    (if (> pending-yield u0)
+      (begin
+        (var-set total-assets (+ (var-get total-assets) pending-yield))
+        (var-set accumulated-yield (+ (var-get accumulated-yield) pending-yield))
+        (var-set last-yield-update stacks-block-height)
+        pending-yield)
+      u0)))
+
+;; New private functions for risk management - FIXED MATCH STATEMENT
+(define-private (check-withdrawal-limits (amount uint))
+  (let ((current-day (/ stacks-block-height u144))
+        (daily-total (default-to u0 (map-get? daily-withdrawals current-day)))
+        (current-total-assets (var-get total-assets))
+        (max-single (/ (* current-total-assets (var-get max-single-withdrawal-pct)) u10000)))
+    
+    ;; Check single withdrawal limit
+    (asserts! (<= amount max-single) (err ERR-WITHDRAWAL-TOO-LARGE))
+    
+    ;; Check daily limit
+    (asserts! (<= (+ daily-total amount) (var-get daily-withdrawal-limit)) 
+              (err ERR-DAILY-LIMIT-EXCEEDED))
+    
+    (ok true)))
+
+(define-private (check-circuit-breaker)
+  (if (var-get circuit-breaker-active)
+    (err ERR-CIRCUIT-BREAKER-TRIGGERED)
+    (let ((current-price (unwrap-panic (get-share-price)))
+          (historical-price (var-get historical-share-price))
+          (price-drop-pct (if (> historical-price u0)
+                           (/ (* (- historical-price current-price) u10000) historical-price)
+                           u0)))
+      (if (> price-drop-pct (var-get circuit-breaker-threshold))
+        (begin
+          (var-set circuit-breaker-active true)
+          (var-set last-price-update stacks-block-height)
+          (err ERR-CIRCUIT-BREAKER-TRIGGERED))
+        (ok true)))))
+
+(define-private (update-daily-withdrawal-tracking (amount uint))
+  (let ((current-day (/ stacks-block-height u144))
+        (daily-total (default-to u0 (map-get? daily-withdrawals current-day))))
+    (map-set daily-withdrawals current-day (+ daily-total amount))
+    (ok true)))
+
 ;; Initialization function
 (define-public (initialize (manager principal) (fee-bps uint))
   (begin
@@ -78,6 +163,8 @@
     (var-set vault-manager manager)
     (var-set management-fee-bps fee-bps)
     (var-set is-initialized true)
+    (var-set last-yield-update stacks-block-height)
+    (var-set historical-share-price u1000000)
     (ok true)))
 
 ;; Admin functions
@@ -106,11 +193,43 @@
     (var-set vault-manager new-manager)
     (ok new-manager)))
 
+;; New admin functions for yield management
+(define-public (set-yield-rate (new-rate uint))
+  (begin
+    (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
+    (asserts! (<= new-rate MAX-YIELD-RATE) (err ERR-INVALID-YIELD-RATE))
+    (update-yield-internal) ;; Update yield before changing rate
+    (var-set annual-yield-rate new-rate)
+    (ok new-rate)))
+
+;; New admin functions for risk management
+(define-public (set-withdrawal-limits (daily-limit uint) (single-withdrawal-pct uint))
+  (begin
+    (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
+    (asserts! (<= single-withdrawal-pct u5000) (err ERR-INVALID-FEE)) ;; Max 50%
+    (var-set daily-withdrawal-limit daily-limit)
+    (var-set max-single-withdrawal-pct single-withdrawal-pct)
+    (ok true)))
+
+(define-public (reset-circuit-breaker)
+  (begin
+    (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
+    (asserts! (>= (- stacks-block-height (var-get last-price-update)) 
+                  (var-get circuit-breaker-cooldown)) 
+              (err ERR-COOLDOWN-NOT-EXPIRED))
+    
+    (var-set circuit-breaker-active false)
+    (var-set historical-share-price (unwrap-panic (get-share-price)))
+    (ok true)))
+
 ;; Core vault functions
 (define-public (deposit (amount uint))
   (begin
     (try! (check-not-paused))
     (asserts! (> amount u0) (err ERR-ZERO-AMOUNT))
+    
+    ;; Update yield before deposit
+    (update-yield-internal)
     
     (let ((shares-to-mint (calculate-shares-for-deposit amount))
           (current-user-shares (default-to u0 (map-get? user-shares tx-sender)))
@@ -132,6 +251,12 @@
     (try! (check-not-paused))
     (asserts! (> share-amount u0) (err ERR-ZERO-AMOUNT))
     
+    ;; Update yield before withdrawal
+    (update-yield-internal)
+    
+    ;; Check circuit breaker
+    (try! (check-circuit-breaker))
+    
     (let ((user-shares-balance (default-to u0 (map-get? user-shares tx-sender)))
           (assets-to-withdraw (calculate-assets-for-shares share-amount))
           (fee-amount (calculate-fee assets-to-withdraw))
@@ -140,12 +265,18 @@
       (asserts! (>= user-shares-balance share-amount) (err ERR-INSUFFICIENT-SHARES))
       (asserts! (>= (stx-get-balance (as-contract tx-sender)) assets-to-withdraw) (err ERR-INSUFFICIENT-BALANCE))
       
+      ;; Check withdrawal limits
+      (try! (check-withdrawal-limits assets-to-withdraw))
+      
       ;; Update user shares
       (map-set user-shares tx-sender (- user-shares-balance share-amount))
       
       ;; Update vault totals
       (var-set total-shares (- (var-get total-shares) share-amount))
       (var-set total-assets (- (var-get total-assets) assets-to-withdraw))
+      
+      ;; Update withdrawal tracking
+      (unwrap-panic (update-daily-withdrawal-tracking assets-to-withdraw))
       
       ;; Transfer assets to user
       (match (as-contract (stx-transfer? net-withdrawal tx-sender tx-sender))
@@ -154,6 +285,16 @@
           (try! (transfer-fee-if-needed fee-amount))
           (ok net-withdrawal))
         error (err ERR-TRANSFER-FAILED)))))
+
+;; New public functions for yield management
+(define-public (update-yield)
+  (let ((yield-added (update-yield-internal)))
+    (ok yield-added)))
+
+(define-public (compound-yield)
+  (begin
+    (update-yield-internal)
+    (ok true)))
 
 ;; Emergency functions
 (define-public (emergency-withdraw)
@@ -174,7 +315,10 @@
     management-fee-bps: (var-get management-fee-bps),
     is-paused: (var-get is-paused),
     vault-manager: (var-get vault-manager),
-    contract-balance: (stx-get-balance (as-contract tx-sender))
+    contract-balance: (stx-get-balance (as-contract tx-sender)),
+    annual-yield-rate: (var-get annual-yield-rate),
+    accumulated-yield: (var-get accumulated-yield),
+    circuit-breaker-active: (var-get circuit-breaker-active)
   }))
 
 (define-read-only (get-user-info (user principal))
@@ -205,6 +349,39 @@
       gross-amount: gross-amount,
       fee: fee,
       net-amount: (- gross-amount fee)
+    })))
+
+;; New read-only functions for yield information
+(define-read-only (get-yield-info)
+  (ok {
+    annual-yield-rate: (var-get annual-yield-rate),
+    last-yield-update: (var-get last-yield-update),
+    accumulated-yield: (var-get accumulated-yield),
+    pending-yield: (calculate-pending-yield)
+  }))
+
+;; New read-only functions for risk management
+(define-read-only (get-risk-metrics)
+  (ok {
+    circuit-breaker-active: (var-get circuit-breaker-active),
+    daily-withdrawal-limit: (var-get daily-withdrawal-limit),
+    max-single-withdrawal-pct: (var-get max-single-withdrawal-pct),
+    current-day-withdrawals: (default-to u0 (map-get? daily-withdrawals (/ stacks-block-height u144))),
+    historical-share-price: (var-get historical-share-price)
+  }))
+
+(define-read-only (get-withdrawal-limits-info (amount uint))
+  (let ((current-day (/ stacks-block-height u144))
+        (daily-total (default-to u0 (map-get? daily-withdrawals current-day)))
+        (current-total-assets (var-get total-assets))
+        (max-single (/ (* current-total-assets (var-get max-single-withdrawal-pct)) u10000)))
+    (ok {
+      max-single-withdrawal: max-single,
+      daily-limit: (var-get daily-withdrawal-limit),
+      daily-used: daily-total,
+      daily-remaining: (- (var-get daily-withdrawal-limit) daily-total),
+      can-withdraw-amount: (and (<= amount max-single) 
+                                (<= (+ daily-total amount) (var-get daily-withdrawal-limit)))
     })))
 
 ;; Contract balance check
