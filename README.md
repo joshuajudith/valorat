@@ -1,50 +1,58 @@
 # Valorat Vault Contract
 
-A Clarity smart contract for managing STX deposits and shares in a secure vault system. Users deposit STX to receive shares, which can later be redeemed for STX minus a management fee. The contract includes administrative controls, emergency functions, and read-only queries for transparency.
+A Clarity smart contract for managing STX deposits and shares with yield generation and enhanced risk management. Users can deposit STX to receive shares, earn yield, and withdraw assets subject to safety controls.
 
 ---
 
-## Features
+## New Features
 
-- **Deposit STX:** Users deposit STX and receive vault shares.
-- **Withdraw STX:** Redeem shares for STX, minus a management fee.
-- **Management Fee:** Configurable fee (default 1%, max 10%).
-- **Pause/Unpause Vault:** Admins can pause or resume vault operations.
-- **Emergency Withdraw:** Vault manager can withdraw all assets in emergencies.
-- **Transparent Queries:** View vault and user info, share price, and withdrawal calculations.
+### Yield Generation
+- **Annual Yield:** Configurable yield rate (default 5%, max 20%)
+- **Yield Compounding:** Automatic yield calculation and distribution
+- **Yield Tracking:** Monitor accumulated and pending yield
+
+### Risk Management
+- **Circuit Breaker:** Automatic pause on significant price drops
+- **Withdrawal Limits:**
+  - Daily withdrawal caps
+  - Single withdrawal percentage limits
+  - Withdrawal tracking
+- **Cooldown Period:** Required waiting time after circuit breaker triggers
 
 ---
 
-## Key Concepts
+## Core Features
 
-- **Shares:** Represent user’s claim on vault assets.
-- **Vault Manager & Owner:** Principals with admin rights.
-- **Fee:** Deducted on withdrawals, sent to vault manager.
+- **Deposit STX:** Users deposit STX and receive vault shares
+- **Withdraw STX:** Redeem shares for STX, minus management fee
+- **Management Fee:** Configurable fee (default 1%, max 10%)
+- **Admin Controls:** Pause/unpause vault, emergency functions
 
 ---
 
 ## Usage
 
-### Initialization
+### Yield Management
 
 ```clarity
-(initialize manager fee-bps)
+(set-yield-rate new-rate)
+(update-yield)
+(compound-yield)
 ```
-- Set vault manager and management fee (only once, by contract owner).
 
-### Depositing
+### Risk Management
+
+```clarity
+(set-withdrawal-limits daily-limit single-withdrawal-pct)
+(reset-circuit-breaker)
+```
+
+### Core Operations
 
 ```clarity
 (deposit amount)
-```
-- Deposit STX and receive shares proportional to vault assets.
-
-### Withdrawing
-
-```clarity
 (withdraw share-amount)
 ```
-- Redeem shares for STX, minus management fee.
 
 ### Admin Controls
 
@@ -54,55 +62,51 @@ A Clarity smart contract for managing STX deposits and shares in a secure vault 
 (set-management-fee new-fee-bps)
 (transfer-management new-manager)
 ```
-- Pause/unpause vault, update fee, or transfer manager role.
 
-### Emergency
+---
+
+## New Error Codes
+
+- `u200`: Withdrawal too large
+- `u201`: Daily limit exceeded
+- `u202`: Circuit breaker triggered
+- `u203`: Cooldown not expired
+- `u204`: Invalid yield rate
+
+## New Read-only Functions
+
+- `get-yield-info`: Yield rates and accumulation stats
+- `get-risk-metrics`: Circuit breaker and withdrawal limit info
+- `get-withdrawal-limits-info`: Check withdrawal constraints
+
+---
+
+## Security Enhancements
+
+- Circuit breaker for price protection
+- Configurable withdrawal limits
+- Daily withdrawal tracking
+- Cooldown periods after circuit breaker triggers
+- Yield rate limits
+
+---
+
+## Constants
 
 ```clarity
-(emergency-withdraw)
+MAX-YIELD-RATE: u2000 (20% annual max)
+BLOCKS-PER-YEAR: u52560
+BASIS-POINTS: u10000
 ```
-- Manager can withdraw all STX from the vault.
-
----
-
-## Read-only Functions
-
-- `get-vault-info`: Vault stats and balances.
-- `get-user-info user`: User’s shares, deposits, and withdrawable assets.
-- `get-share-price`: Current share price (fixed point).
-- `calculate-deposit-shares amount`: Shares for a deposit.
-- `calculate-withdrawal-amount shares`: Withdrawal amount and fee.
-- `get-contract-balance`: Vault’s STX balance.
-
----
-
-## Error Codes
-
-- `u100`: Not authorized
-- `u101`: Vault paused
-- `u102`: Zero amount
-- `u103`: Insufficient shares
-- `u104`: Insufficient balance
-- `u105`: Already initialized
-- `u106`: Invalid fee
-- `u107`: Transfer failed
-
----
-
-## Security
-
-- Only authorized principals can perform admin actions.
-- Vault can be paused for safety.
-- Emergency withdrawal for asset protection.
 
 ---
 
 ## License
 
-MIT License (add your license details here).
+MIT License (add your license details here)
 
 ---
 
 ## Author
 
-[Your Name or Organization]
+[judith joshua]
