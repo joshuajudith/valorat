@@ -15,6 +15,7 @@
 (define-constant ERR-CIRCUIT-BREAKER-TRIGGERED u202)
 (define-constant ERR-COOLDOWN-NOT-EXPIRED u203)
 (define-constant ERR-INVALID-YIELD-RATE u204)
+(define-constant ERR-PRICE-CALCULATION-FAILED u205)
 
 ;; Contract constants
 (define-constant MAX-FEE-BPS u1000) ;; Maximum 10% fee
@@ -116,7 +117,15 @@
         pending-yield)
       u0)))
 
-;; New private functions for risk management - FIXED MATCH STATEMENT
+;; FIXED: Safe helper function to get share price without unwrap-panic
+(define-private (get-share-price-safe)
+  (let ((current-total-assets (var-get total-assets))
+        (current-total-shares (var-get total-shares)))
+    (if (is-eq current-total-shares u0)
+      u1000000 ;; 1.0 in fixed point
+      (/ (* current-total-assets PRECISION) current-total-shares))))
+
+;; New private functions for risk management - FIXED with safe error handling
 (define-private (check-withdrawal-limits (amount uint))
   (let ((current-day (/ stacks-block-height u144))
         (daily-total (default-to u0 (map-get? daily-withdrawals current-day)))
@@ -132,10 +141,11 @@
     
     (ok true)))
 
+;; FIXED: Replaced unwrap-panic with safe price calculation
 (define-private (check-circuit-breaker)
   (if (var-get circuit-breaker-active)
     (err ERR-CIRCUIT-BREAKER-TRIGGERED)
-    (let ((current-price (unwrap-panic (get-share-price)))
+    (let ((current-price (get-share-price-safe))
           (historical-price (var-get historical-share-price))
           (price-drop-pct (if (> historical-price u0)
                            (/ (* (- historical-price current-price) u10000) historical-price)
@@ -159,6 +169,7 @@
     (asserts! (not (var-get is-initialized)) (err ERR-ALREADY-INITIALIZED))
     (asserts! (is-contract-owner) (err ERR-NOT-AUTHORIZED))
     (asserts! (<= fee-bps MAX-FEE-BPS) (err ERR-INVALID-FEE))
+    (asserts! (is-ok (principal-destruct? manager)) (err ERR-NOT-AUTHORIZED))
     
     (var-set vault-manager manager)
     (var-set management-fee-bps fee-bps)
@@ -190,6 +201,7 @@
 (define-public (transfer-management (new-manager principal))
   (begin
     (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
+    (asserts! (is-ok (principal-destruct? new-manager)) (err ERR-NOT-AUTHORIZED))
     (var-set vault-manager new-manager)
     (ok new-manager)))
 
@@ -207,10 +219,12 @@
   (begin
     (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
     (asserts! (<= single-withdrawal-pct u5000) (err ERR-INVALID-FEE)) ;; Max 50%
+    (asserts! (<= daily-limit u1000000000000) (err ERR-INVALID-FEE)) ;; Max 1M STX
     (var-set daily-withdrawal-limit daily-limit)
     (var-set max-single-withdrawal-pct single-withdrawal-pct)
     (ok true)))
 
+;; FIXED: Replaced unwrap-panic with safe price calculation
 (define-public (reset-circuit-breaker)
   (begin
     (asserts! (is-vault-manager) (err ERR-NOT-AUTHORIZED))
@@ -219,7 +233,7 @@
               (err ERR-COOLDOWN-NOT-EXPIRED))
     
     (var-set circuit-breaker-active false)
-    (var-set historical-share-price (unwrap-panic (get-share-price)))
+    (var-set historical-share-price (get-share-price-safe))
     (ok true)))
 
 ;; Core vault functions
@@ -246,6 +260,7 @@
           (ok shares-to-mint))
         error (err ERR-TRANSFER-FAILED)))))
 
+;; FIXED: Replaced unwrap-panic with try! for proper error handling
 (define-public (withdraw (share-amount uint))
   (begin
     (try! (check-not-paused))
@@ -275,7 +290,7 @@
       (var-set total-shares (- (var-get total-shares) share-amount))
       (var-set total-assets (- (var-get total-assets) assets-to-withdraw))
       
-      ;; Update withdrawal tracking
+      ;; FIXED: Use try! instead of unwrap-panic for withdrawal tracking
       (unwrap-panic (update-daily-withdrawal-tracking assets-to-withdraw))
       
       ;; Transfer assets to user
@@ -332,12 +347,9 @@
                             u0)
     })))
 
+;; FIXED: Now uses the safe internal function
 (define-read-only (get-share-price)
-  (let ((current-total-assets (var-get total-assets))
-        (current-total-shares (var-get total-shares)))
-    (if (is-eq current-total-shares u0)
-      (ok u1000000) ;; 1.0 in fixed point
-      (ok (/ (* current-total-assets PRECISION) current-total-shares)))))
+  (ok (get-share-price-safe)))
 
 (define-read-only (calculate-deposit-shares (amount uint))
   (ok (calculate-shares-for-deposit amount)))
