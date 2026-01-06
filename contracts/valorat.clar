@@ -272,7 +272,8 @@
     ;; Check circuit breaker
     (try! (check-circuit-breaker))
     
-    (let ((user-shares-balance (default-to u0 (map-get? user-shares tx-sender)))
+    (let ((caller tx-sender)
+          (user-shares-balance (default-to u0 (map-get? user-shares tx-sender)))
           (assets-to-withdraw (calculate-assets-for-shares share-amount))
           (fee-amount (calculate-fee assets-to-withdraw))
           (net-withdrawal (- assets-to-withdraw fee-amount)))
@@ -293,8 +294,8 @@
       ;; FIXED: Use try! instead of unwrap-panic for withdrawal tracking
       (unwrap-panic (update-daily-withdrawal-tracking assets-to-withdraw))
       
-      ;; Transfer assets to user
-      (match (as-contract (stx-transfer? net-withdrawal tx-sender tx-sender))
+      ;; Transfer assets to user (from contract to original caller)
+      (match (as-contract (stx-transfer? net-withdrawal tx-sender caller))
         success (begin
           ;; Transfer fee to manager
           (try! (transfer-fee-if-needed fee-amount))
@@ -398,4 +399,3 @@
 
 ;; Contract balance check
 (define-read-only (get-contract-balance)
-  (ok (stx-get-balance (as-contract tx-sender))))
